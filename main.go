@@ -1,7 +1,9 @@
-package main
 
+package main
+ 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,110 +11,92 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+ 
+	chat "chat-service/internal"
 )
-
-type Server struct {
-	hub         *Hub
-	db          *DB
-	mux         *http.ServeMux
-	limiter     *RateLimiter
-	connLimiter *ConnLimiter
-}
-
+ 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.SetPrefix("[nexora-chat] ")
-
-	log.Println("Starting Nexora Chat Service...")
-
+	log.SetPrefix("[nexora] ")
+	log.Println("starting Nexora Chat Service...")
+ 
 	if err := validateEnv(); err != nil {
-		log.Fatalf("Configuration error: %v", err)
+		log.Fatalf("config error: %v", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+ 
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-
-	db, err := NewDB(ctx)
+ 
+	db, err := chat.NewDB(ctx)
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		log.Fatalf("database: %v", err)
 	}
 	defer db.Close()
-
-	hub := NewHub(db)
+ 
+	hub := chat.NewHub(db)
 	go hub.Run()
-
-	limiter := NewRateLimiter(30, time.Second)
-	connLimiter := NewConnLimiter(10)
-
-	server := &Server{
-		hub:         hub,
-		db:          db,
-		mux:         http.NewServeMux(),
-		limiter:     limiter,
-		connLimiter: connLimiter,
-	}
-
-	server.mux.HandleFunc("/ws/chat", server.handleWebSocket)
-	server.mux.HandleFunc("/health", server.handleHealth)
-	server.mux.HandleFunc("/api/conversation", server.handleConversation)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
+ 
+	limiter := chat.NewRateLimiter(30, time.Second)
+	connLimiter := chat.NewConnLimiter(10)
+	server := chat.NewServer(hub, db, limiter, connLimiter)
+ 
+	port := envOr("PORT", "8080")
 	httpServer := &http.Server{
 		Addr:         ":" + port,
-		Handler:      corsMiddleware(server.mux),
+		Handler:      corsMiddleware(server.Mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-
+ 
 	go func() {
-		log.Printf("Listening on port %s", port)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
+		log.Printf("listening on :%s", port)
+		if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server: %v", err)
 		}
 	}()
-
+ 
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Shutdown error: %v", err)
+	sig := <-quit
+	log.Printf("signal received: %v, shutting down...", sig)
+ 
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutCancel()
+ 
+	if err := httpServer.Shutdown(shutCtx); err != nil {
+		log.Printf("shutdown error: %v", err)
 	}
-
-	log.Println("Stopped")
+	log.Println("stopped")
 }
-
+ 
 func validateEnv() error {
 	required := []string{"DATABASE_URL", "JWT_SECRET"}
-	for _, key := range required {
-		if os.Getenv(key) == "" {
-			return fmt.Errorf("required environment variable %s is not set", key)
+	for _, k := range required {
+		if os.Getenv(k) == "" {
+			return fmt.Errorf("required env var %q is not set", k)
 		}
 	}
 	return nil
 }
-
+ 
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+ 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Client-Info, Apikey")
-
 		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
 }
