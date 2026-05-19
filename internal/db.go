@@ -37,7 +37,7 @@ type DB struct {
  
 // NewDB — DATABASE_URL dan connection pool yaratadi va ping tekshiradi
 func NewDB(ctx context.Context) (*DB, error) {
-	dsn := os.Getenv("postgresql://neondb_owner:npg_YAlZv5QE0Mzb@ep-calm-scene-aq4w4ju9-pooler.c-8.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
+    dsn := os.Getenv("DATABASE_URL")	
 	if dsn == "" {
 		return nil, errors.New("DATABASE_URL environment variable is required")
 	}
